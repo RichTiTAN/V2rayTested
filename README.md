@@ -17,7 +17,7 @@ SUBSCRIPTIONS = [
     "SUB04"
 ]
 ```
-6. Run
+5. Run
 ``` Python app.py ```
 
 To exit/cancel you can just close the app.
