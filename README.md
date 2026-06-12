@@ -3,8 +3,8 @@ This is a small app to check v2ray subscriptions, exctract healthy configs for y
 
 # How to use
 __You need the Python application to use this app__
-1. Download app.py
-2. Download xray-core
+1. Download app.py from this repository.
+2. Download [xray-core](https://github.com/XTLS/Xray-core)
 3. Put all the files into a single folder
 4. Modify app.py in NotePad or any similar app and replace these lines to match your settings:
 ```
