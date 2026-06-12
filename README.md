@@ -19,5 +19,6 @@ SUBSCRIPTIONS = [
 ```
 5. Run
 ``` Python app.py ```
+in terminal
 
 To exit/cancel you can just close the app.
