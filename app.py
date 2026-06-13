@@ -10,9 +10,9 @@ import atexit
 import glob
 import requests
 import asyncio
-import socket
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from github import Github
+from github import Github, Auth
 
 # ==========================================
 # CONFIGURATION
@@ -31,7 +31,7 @@ SUBSCRIPTIONS = [
 ]
 
 TCP_PRECHECK_CONCURRENCY = 1500 
-XRAY_THREADS = 250               
+XRAY_THREADS = 250                
 TEST_TIMEOUT = 6                
 LOOP_INTERVAL = 7200            
 
@@ -43,6 +43,9 @@ process_lock = threading.Lock()
 
 def cleanup_processes():
     print("\n[!] Shutting down safely... Cleaning up processes and files.")
+    
+    os.system("taskkill /f /im xray.exe >nul 2>&1" if os.name == 'nt' else "pkill -f xray >/dev/null 2>&1")
+    
     with process_lock:
         for p in active_processes:
             try:
@@ -60,8 +63,8 @@ atexit.register(cleanup_processes)
 # ==========================================
 # PARSING LOGIC
 # ==========================================
-def rename_link(link, new_name="V2rayTested"):
-    """Safely renames VLESS or SS configs by replacing the URI fragment."""
+def rename_link(link, new_name):
+    """Safely renames VLESS configs by replacing the URI fragment."""
     safe_name = urllib.parse.quote(new_name)
     
     if '#' in link:
@@ -76,23 +79,12 @@ def parse_link_details(link):
         if link.startswith("vless://"):
             parsed = urllib.parse.urlparse(link)
             return parsed.hostname, (parsed.port or 443)
-        
-        elif link.startswith("ss://"):
-            parsed = urllib.parse.urlparse(link)
-            if '@' in parsed.netloc:
-                host_port = parsed.netloc.split('@')[1]
-                return host_port.split(':')[0], int(host_port.split(':')[1])
-            else:
-                # Legacy base64 format
-                decoded = base64.b64decode(parsed.netloc + "==").decode('utf-8')
-                host_port = decoded.split('@')[1]
-                return host_port.split(':')[0], int(host_port.split(':')[1])
     except:
         return None, None
     return None, None
 
 def parse_to_outbound(link):
-    """Converts verified working links into Xray format (VLESS Reality & Shadowsocks)."""
+    """Converts verified working links into Xray format (VLESS Reality)."""
     try:
         if link.startswith("vless://"):
             parsed = urllib.parse.urlparse(link)
@@ -124,34 +116,6 @@ def parse_to_outbound(link):
                 outbound["streamSettings"]["security"] = "tls"
                 outbound["streamSettings"]["tlsSettings"] = {"serverName": params.get("sni", ""), "fingerprint": params.get("fp", "chrome")}
             return outbound
-            
-        elif link.startswith("ss://"):
-            parsed = urllib.parse.urlparse(link)
-            if '@' in parsed.netloc:
-                userinfo, host_port = parsed.netloc.split('@', 1)
-                host = host_port.split(':')[0]
-                port = int(host_port.split(':')[1])
-                decoded_userinfo = base64.b64decode(userinfo + "==").decode('utf-8')
-                method, password = decoded_userinfo.split(':', 1)
-            else:
-                decoded = base64.b64decode(parsed.netloc + "==").decode('utf-8')
-                userinfo, host_port = decoded.split('@', 1)
-                host = host_port.split(':')[0]
-                port = int(host_port.split(':')[1])
-                method, password = userinfo.split(':', 1)
-
-            outbound = {
-                "protocol": "shadowsocks",
-                "settings": {
-                    "servers": [{
-                        "address": host,
-                        "port": port,
-                        "method": method,
-                        "password": password
-                    }]
-                }
-            }
-            return outbound
     except:
         return None
     return None
@@ -160,7 +124,6 @@ def parse_to_outbound(link):
 # PHASE 1: ASYNC TCP PRE-CHECK
 # ==========================================
 async def check_tcp_port(semaphore, link):
-    """Asynchronously checks if a server's port is even responsive."""
     host, port = parse_link_details(link)
     if not host or not port:
         return None
@@ -189,6 +152,8 @@ async def run_tcp_precheck(links):
 # PHASE 2: DETAILED XRAY TESTING
 # ==========================================
 def test_single_config(link, port):
+    time.sleep(random.uniform(0.0, 2.0))
+
     outbound = parse_to_outbound(link)
     if not outbound: return None
 
@@ -224,8 +189,54 @@ def test_single_config(link, port):
     except: pass
 
     if is_working:
-        return rename_link(link, "V2rayTested")
+        return link
     return None
+
+# ==========================================
+# PHASE 3: GEOIP LOCATION FETCHING
+# ==========================================
+def geoip_single_config(link, port):
+    """Routes a request through the working proxy to get the real exit-node location."""
+    
+    # STAGGER THE STARTUP: Prevent Phase 3 fork bomb
+    time.sleep(random.uniform(0.0, 2.0))
+
+    outbound = parse_to_outbound(link)
+    if not outbound: return rename_link(link, "V2rayTested-UNK")
+
+    config = {
+        "log": {"loglevel": "none"},
+        "inbounds": [{"port": port, "listen": "127.0.0.1", "protocol": "socks"}],
+        "outbounds": [outbound]
+    }
+
+    config_file = f"temp_geo_{port}.json"
+    with open(config_file, 'w') as f:
+        json.dump(config, f)
+
+    proc = subprocess.Popen([XRAY_EXE, "-c", config_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with process_lock: active_processes.append(proc)
+
+    time.sleep(1) 
+
+    location = "UNK"
+    try:
+        proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+        geo_r = requests.get("http://ip-api.com/json/", proxies=proxies, timeout=TEST_TIMEOUT)
+        if geo_r.status_code == 200:
+            location = geo_r.json().get("countryCode", "UNK")
+    except:
+        pass
+
+    with process_lock:
+        if proc in active_processes: active_processes.remove(proc)
+    proc.terminate()
+    proc.wait()
+    try: os.remove(config_file)
+    except: pass
+
+    # Rename with the final location tag
+    return rename_link(link, f"V2rayTested-{location}")
 
 # ==========================================
 # GITHUB & MAIN LOOP
@@ -238,25 +249,25 @@ def fetch_configs():
             r = requests.get(sub, timeout=15)
             text = r.text.strip()
             
-            # Decode if it's base64 hidden
-            if not text.startswith("vmess://") and not text.startswith("vless://") and not text.startswith("ss://"):
+            if not text.startswith("vmess://") and not text.startswith("vless://"):
                 try: text = base64.b64decode(text + "=" * (-len(text) % 4)).decode('utf-8')
                 except: pass
                 
             for line in text.splitlines():
-                # Keep VLESS and Shadowsocks (SS). Ignore VMess and Trojan.
-                if line.startswith("vless://") or line.startswith("ss://"):
+                if line.startswith("vless://"):
                     all_links.add(line)
         except Exception as e:
             print(f"[!] Failed fetching {sub}: {e}")
             
-    print(f"[*] Filtered out old protocols. Kept {len(all_links)} VLESS and SS configs.")
+    print(f"[*] Filtered out old protocols. Kept {len(all_links)} VLESS configs.")
     return list(all_links)
 
 def upload_to_github(working_links):
     print("\n[*] Uploading verified list to GitHub...")
     try:
-        g = Github(GITHUB_TOKEN)
+        auth = Auth.Token(GITHUB_TOKEN)
+        g = Github(auth=auth)
+        
         repo = g.get_repo(REPO_NAME)
         raw_text = "\n".join(working_links)
         b64_content = base64.b64encode(raw_text.encode('utf-8')).decode('utf-8')
@@ -280,44 +291,48 @@ def main():
         raw_links = fetch_configs()
         print(f"[+] Downloaded {len(raw_links)} raw unique configs.")
         
-        # Run Phase 1 (Async TCP check)
+        # Phase 1: Async TCP check
         survived_links = asyncio.run(run_tcp_precheck(raw_links))
         
-        # Run Phase 2 (Deep Xray check on survivors)
-        working_configs = []
+        # Phase 2: Deep Xray check on survivors
+        working_raw_configs = []
         if survived_links:
-            print(f"[*] Phase 2: Deep-testing {len(survived_links)} configs with Xray Core...")
+            print(f"\n[*] Phase 2: Deep-testing {len(survived_links)} configs with Xray Core...")
             with ThreadPoolExecutor(max_workers=XRAY_THREADS) as executor:
                 futures = {executor.submit(test_single_config, link, 10000 + (i % 5000)): link for i, link in enumerate(survived_links)}
                 for i, future in enumerate(as_completed(futures)):
                     result = future.result()
-                    if result: working_configs.append(result)
+                    if result: working_raw_configs.append(result)
                     if (i + 1) % 100 == 0:
-                        print(f"    Xray checked {i + 1}/{len(survived_links)}... (Found {len(working_configs)} authenticated so far)")
+                        print(f"    Xray checked {i + 1}/{len(survived_links)}... (Found {len(working_raw_configs)} authenticated)")
+
+        # Phase 3: GeoIP Test on Working Configs
+        final_configs = []
+        if working_raw_configs:
+            print(f"\n[*] Phase 3: Fetching GeoIP locations for {len(working_raw_configs)} working configs...")
+            with ThreadPoolExecutor(max_workers=XRAY_THREADS) as executor:
+                futures = {executor.submit(geoip_single_config, link, 20000 + (i % 5000)): link for i, link in enumerate(working_raw_configs)}
+                for i, future in enumerate(as_completed(futures)):
+                    result = future.result()
+                    if result: final_configs.append(result)
+                    if (i + 1) % 50 == 0:
+                        print(f"    GeoIP fetched {i + 1}/{len(working_raw_configs)}...")
         
         # ==========================================
-        # DUPLICATION CHECK 
+        # DUPLICATION CHECK & UPLOAD
         # ==========================================
-        unique_configs = list(set(working_configs))
-        duplicates_removed = len(working_configs) - len(unique_configs)
+        unique_configs = list(set(final_configs))
+        duplicates_removed = len(final_configs) - len(unique_configs)
         
-        print(f"\n[+] Cycle Complete. Out of {len(raw_links)} inputs, {len(working_configs)} passed the Xray test.")
+        print(f"\n[+] Cycle Complete. Out of {len(raw_links)} inputs, {len(final_configs)} passed the full suite.")
         if duplicates_removed > 0:
             print(f"[*] Removed {duplicates_removed} duplicate configs. Final count: {len(unique_configs)} strictly unique configs.")
         
         if unique_configs:
             upload_to_github(unique_configs)
             
-        print(f"[*] Cycle finished. Sleeping for 2 hours...")
+        print(f"[*] Cycle finished. Sleeping for {LOOP_INTERVAL} seconds...")
         time.sleep(LOOP_INTERVAL)
-        
-        print(f"\n[+] Cycle Complete. Out of {len(raw_links)} inputs, {len(working_configs)} are completely healthy.")
-        
-        if working_configs:
-            upload_to_github(working_configs)
-            
-        print(f"[*] Cycle finished. Sleeping for 2 hours...")
-        time.sleep(LOOP_INTERVAL) 
 
 if __name__ == "__main__":
     if not os.path.exists(XRAY_EXE):
