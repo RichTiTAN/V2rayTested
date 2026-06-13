@@ -295,6 +295,22 @@ def main():
                     if (i + 1) % 100 == 0:
                         print(f"    Xray checked {i + 1}/{len(survived_links)}... (Found {len(working_configs)} authenticated so far)")
         
+        # ==========================================
+        # DUPLICATION CHECK 
+        # ==========================================
+        unique_configs = list(set(working_configs))
+        duplicates_removed = len(working_configs) - len(unique_configs)
+        
+        print(f"\n[+] Cycle Complete. Out of {len(raw_links)} inputs, {len(working_configs)} passed the Xray test.")
+        if duplicates_removed > 0:
+            print(f"[*] Removed {duplicates_removed} duplicate configs. Final count: {len(unique_configs)} strictly unique configs.")
+        
+        if unique_configs:
+            upload_to_github(unique_configs)
+            
+        print(f"[*] Cycle finished. Sleeping for 2 hours...")
+        time.sleep(LOOP_INTERVAL)
+        
         print(f"\n[+] Cycle Complete. Out of {len(raw_links)} inputs, {len(working_configs)} are completely healthy.")
         
         if working_configs:
